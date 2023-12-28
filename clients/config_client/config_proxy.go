@@ -49,7 +49,7 @@ type ConfigProxy struct {
 func NewConfigProxy(ctx context.Context, serverConfig []constant.ServerConfig, clientConfig constant.ClientConfig, httpAgent http_agent.IHttpAgent) (IConfigProxy, error) {
 	proxy := ConfigProxy{}
 	var err error
-	proxy.nacosServer, err = nacos_server.NewNacosServer(ctx, serverConfig, clientConfig, httpAgent, clientConfig.TimeoutMs, clientConfig.Endpoint)
+	proxy.nacosServer, err = nacos_server.NewNacosServer(ctx, serverConfig, clientConfig, httpAgent, clientConfig.TimeoutMs, clientConfig.Endpoint, nil)
 	proxy.clientConfig = clientConfig
 	return &proxy, err
 }
@@ -123,7 +123,7 @@ func (cp *ConfigProxy) queryConfig(dataId, group, tenant string, timeout uint64,
 	}
 	if response.IsSuccess() {
 		cache.WriteConfigToFile(cacheKey, cp.clientConfig.CacheDir, response.Content)
-		//todo LocalConfigInfoProcessor.saveEncryptDataKeySnapshot
+		cache.WriteEncryptedDataKeyToFile(cacheKey, cp.clientConfig.CacheDir, response.EncryptedDataKey)
 		if response.ContentType == "" {
 			response.ContentType = "text"
 		}
@@ -132,7 +132,7 @@ func (cp *ConfigProxy) queryConfig(dataId, group, tenant string, timeout uint64,
 
 	if response.GetErrorCode() == 300 {
 		cache.WriteConfigToFile(cacheKey, cp.clientConfig.CacheDir, "")
-		//todo LocalConfigInfoProcessor.saveEncryptDataKeySnapshot
+		cache.WriteEncryptedDataKeyToFile(cacheKey, cp.clientConfig.CacheDir, "")
 		return response, nil
 	}
 

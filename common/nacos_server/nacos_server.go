@@ -21,7 +21,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha1"
 	"encoding/base64"
-	"io/ioutil"
+	"io"
 	"math/rand"
 	"net/http"
 	"reflect"
@@ -56,11 +56,15 @@ type NacosServer struct {
 	lastSrvRefTime        int64
 	vipSrvRefInterMills   int64
 	contextPath           string
+	endpointContextPath   string
+	endpointQueryParams   string
+	endpointQueryHeader   map[string][]string
+	clusterName           string
 	currentIndex          int32
 	ServerSrcChangeSignal chan struct{}
 }
 
-func NewNacosServer(ctx context.Context, serverList []constant.ServerConfig, clientCfg constant.ClientConfig, httpAgent http_agent.IHttpAgent, timeoutMs uint64, endpoint string) (*NacosServer, error) {
+func NewNacosServer(ctx context.Context, serverList []constant.ServerConfig, clientCfg constant.ClientConfig, httpAgent http_agent.IHttpAgent, timeoutMs uint64, endpoint string, endpointQueryHeader map[string][]string) (*NacosServer, error) {
 	severLen := len(serverList)
 	if severLen == 0 && endpoint == "" {
 		return &NacosServer{}, errors.New("both serverlist  and  endpoint are empty")
@@ -75,14 +79,19 @@ func NewNacosServer(ctx context.Context, serverList []constant.ServerConfig, cli
 		timeoutMs:             timeoutMs,
 		endpoint:              endpoint,
 		vipSrvRefInterMills:   10000,
+		endpointContextPath:   clientCfg.EndpointContextPath,
+		endpointQueryParams:   clientCfg.EndpointQueryParams,
+		endpointQueryHeader:   endpointQueryHeader,
+		clusterName:           clientCfg.ClusterName,
 		contextPath:           clientCfg.ContextPath,
 		ServerSrcChangeSignal: make(chan struct{}, 1),
 	}
 	if severLen > 0 {
 		ns.currentIndex = rand.Int31n(int32(severLen))
+	} else {
+		ns.initRefreshSrvIfNeed(ctx)
 	}
 
-	ns.initRefreshSrvIfNeed(ctx)
 	_, err := securityLogin.Login()
 
 	if err != nil {
@@ -133,7 +142,7 @@ func (server *NacosServer) callConfigServer(api string, params map[string]string
 		return
 	}
 	var bytes []byte
-	bytes, err = ioutil.ReadAll(response.Body)
+	bytes, err = io.ReadAll(response.Body)
 	defer response.Body.Close()
 	if err != nil {
 		return
@@ -176,7 +185,7 @@ func (server *NacosServer) callServer(api string, params map[string]string, meth
 		return
 	}
 	var bytes []byte
-	bytes, err = ioutil.ReadAll(response.Body)
+	bytes, err = io.ReadAll(response.Body)
 	defer response.Body.Close()
 	if err != nil {
 		return
@@ -264,31 +273,44 @@ func (server *NacosServer) initRefreshSrvIfNeed(ctx context.Context) {
 	if server.endpoint == "" {
 		return
 	}
-	server.refreshServerSrvIfNeed()
+
+	if len(strings.TrimSpace(server.endpointContextPath)) == 0 {
+		server.endpointContextPath = "nacos"
+	}
+
+	if len(strings.TrimSpace(server.clusterName)) == 0 {
+		server.clusterName = "serverlist"
+	}
+	urlString := "http://" + server.endpoint + "/" + strings.TrimSpace(server.endpointContextPath) + "/" + strings.TrimSpace(server.clusterName)
+	if len(strings.TrimSpace(server.endpointQueryParams)) != 0 {
+		urlString += "?" + server.endpointQueryParams
+	}
+	logger.Infof("nacos address server url: <%s>", urlString)
+
+	server.refreshServerSrvIfNeed(urlString, server.endpointQueryHeader)
 	go func() {
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			default:
-				time.Sleep(time.Duration(1) * time.Second)
-				server.refreshServerSrvIfNeed()
+				time.Sleep(time.Duration(10) * time.Second)
+				server.refreshServerSrvIfNeed(urlString, server.endpointQueryHeader)
 			}
 		}
 	}()
 
 }
 
-func (server *NacosServer) refreshServerSrvIfNeed() {
+func (server *NacosServer) refreshServerSrvIfNeed(urlString string, header map[string][]string) {
 	if util.CurrentMillis()-server.lastSrvRefTime < server.vipSrvRefInterMills && len(server.serverList) > 0 {
 		return
 	}
 
 	var list []string
-	urlString := "http://" + server.endpoint + "/nacos/serverlist"
-	result := server.httpAgent.RequestOnlyResult(http.MethodGet, urlString, nil, server.timeoutMs, nil)
+
+	result := server.httpAgent.RequestOnlyResult(http.MethodGet, urlString, header, server.timeoutMs, nil)
 	list = strings.Split(result, "\n")
-	logger.Infof("http nacos server list: <%s>", result)
 
 	var servers []constant.ServerConfig
 	contextPath := server.contextPath
@@ -314,9 +336,13 @@ func (server *NacosServer) refreshServerSrvIfNeed() {
 	if len(servers) > 0 {
 		if !reflect.DeepEqual(server.serverList, servers) {
 			server.Lock()
-			logger.Infof("server list is updated, old: <%v>,new:<%v>", server.serverList, servers)
+			var serverPrev = server.serverList
+			logger.Infof("server list is updated, old: <%v>,new:<%v>", serverPrev, servers)
+
 			server.serverList = servers
-			server.ServerSrcChangeSignal <- struct{}{}
+			if serverPrev != nil {
+				server.ServerSrcChangeSignal <- struct{}{}
+			}
 			server.lastSrvRefTime = util.CurrentMillis()
 			server.Unlock()
 		}
